@@ -3,7 +3,9 @@ import requests
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
-from PIL import Image, ImageDraw
+from PIL import Image, ImageOps, ImageDraw
+from rembg import remove  # Импортируем функцию удаления фона
+import numpy as np
 import asyncio
 
 TOKEN = os.getenv("TOKEN")
@@ -15,49 +17,69 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Функция превращения картинки в стикер (белая обводка + скругленные углы)
-def make_sticker(input_path: str, output_path: str):
-    img = Image.open(input_path).convert("RGBA")
-    w, h = img.size
+# Функция превращения картинки в НАСТОЯЩИЙ стикер (удаление фона + обводка + 512x512)
+def make_real_sticker(input_path: str, output_path: str):
+    # 1. Открываем изображение и удаляем фон
+    with open(input_path, 'rb') as i:
+        input_image = i.read()
     
-    # Скругляем углы исходной картинки
-    radius = int(min(w, h) * 0.1)
-    mask = Image.new("L", (w, h), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle([(0, 0), (w, h)], radius=radius, fill=255)
-    img.putalpha(mask)
+    # rembg возвращает изображение с прозрачным фоном (объект вырезан)
+    output_image_bytes = remove(input_image)
     
-    # Создаем белую подложку (эффект наклейки-стикера)
-    padding = 25
-    bg_w, bg_h = w + padding * 2, h + padding * 2
-    sticker_bg = Image.new("RGBA", (bg_w, bg_h), (255, 255, 255, 0))
+    # Конвертируем байты обратно в объект Pillow
+    import io
+    img = Image.open(io.BytesIO(output_image_bytes)).convert("RGBA")
     
-    bg_mask = Image.new("L", (bg_w, bg_h), 0)
-    bg_draw = ImageDraw.Draw(bg_mask)
-    bg_draw.rounded_rectangle([(0, 0), (bg_w, bg_h)], radius=radius + 10, fill=255)
-    sticker_bg.putalpha(bg_mask)
+    # 2. Изменяем размер до 512x512 (вписываем с сохранением пропорций)
+    img.thumbnail((512, 512), Image.Resampling.LANCZOS)
     
-    # Рисуем сплошную белую заливку подложки
-    solid_bg = Image.new("RGBA", (bg_w, bg_h), (255, 255, 255, 255))
-    solid_bg.putalpha(bg_mask)
+    # Создаем новое пустое изображение 512x512 с прозрачностью
+    final_img = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
     
-    # Накладываем картинку на белую подложку
-    solid_bg.paste(img, (padding, padding), img)
-    solid_bg.save(output_path, "PNG")
+    # Вычисляем позицию для вставки (по центру)
+    paste_x = (512 - img.width) // 2
+    paste_y = (512 - img.height) // 2
+    
+    # Накладываем вырезанный объект на центр пустого холста
+    final_img.paste(img, (paste_x, paste_y), img)
+
+    # 3. Добавляем белую обводку (контур)
+    # Для этого создаем "расширенную" маску объекта
+    alpha = final_img.getchannel("A")
+    
+    # Создаем силуэт (расширяем его с помощью фильтра)
+    # Используем морфологическое расширение (dilation) для создания контура
+    from PIL import ImageFilter
+    # Создаем маску непрозрачности
+    mask = alpha.point(lambda p: 255 if p > 0 else 0)
+    
+    # Расширяем маску (толщина обводки)
+    border_width = 6  # Толщина обводки в пикселях
+    dilated_mask = mask.filter(ImageFilter.MaxFilter(border_width * 2 + 1))
+    
+    # Создаем слой обводки (сплошной белый)
+    border_layer = Image.new("RGBA", (512, 512), (255, 255, 255, 255))
+    border_layer.putalpha(dilated_mask)
+    
+    # 4. Собираем все вместе: Обводка + Оригинальный объект
+    sticker_with_border = Image.alpha_composite(border_layer, final_img)
+    
+    # Сохраняем как PNG с прозрачностью
+    sticker_with_border.save(output_path, "PNG")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! Я бот-мастер детских стикеров.\n\n"
-        "Используй команду `/find [тема]`, чтобы я нашел картинку и сделал из нее готовый стикер!\n"
-        "Пример: `/find cute cat`"
+        "Привет! Я бот-мастер НАСТОЯЩИХ детских стикеров.\n\n"
+        "Используй команду `/find [тема]`, чтобы я нашел картинку, вырезал фон, добавил обводку и сделал стикер 512x512!\n"
+        "Пример: `/find cute cartoon cat`"
     )
 
 @dp.message(Command("find"))
 async def cmd_find(message: types.Message):
     text_parts = message.text.split(maxsplit=1)
     if len(text_parts) < 2:
-        await message.answer("Пожалуйста, укажи ключевое слово. Пример:\n`/find funny puppy`")
+        await message.answer("Пожалуйста, укажи ключевое слово. Пример:\n`/find funny cartoon dog`")
         return
     
     query = text_parts[1]
@@ -69,12 +91,12 @@ async def cmd_find(message: types.Message):
     url = f"https://api.unsplash.com/photos/random?query={query}&client_id={UNSPLASH_KEY}"
     
     try:
+        await message.answer("Ищу и превращаю в стикер...")
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
             image_url = data["urls"]["regular"]
             
-            # Скачиваем исходное фото во временный файл
             img_data = requests.get(image_url).content
             raw_path = "raw_image.jpg"
             sticker_path = "sticker.png"
@@ -82,14 +104,14 @@ async def cmd_find(message: types.Message):
             with open(raw_path, "wb") as handler:
                 handler.write(img_data)
             
-            # Превращаем в стикер
-            make_sticker(raw_path, sticker_path)
+            # Превращаем в НАСТОЯЩИЙ стикер
+            make_real_sticker(raw_path, sticker_path)
             
-            # Отправляем готовый стикер (как документ, чтобы Telegram не сжимал PNG с прозрачностью)
+            # Отправляем готовый стикер (обязательно как документ, чтобы сохранить формат)
             photo_file = types.FSInputFile(sticker_path)
             await message.answer_document(
                 document=photo_file, 
-                caption=f"✨ Готовый стикер по запросу: *{query}*"
+                caption=f"✨ Готовый стикер по запросу: *{query}*\n(Теперь с прозрачным фоном и обводкой 512x512!)"
             )
         else:
             await message.answer("Ничего не нашлось, попробуй другое слово.")

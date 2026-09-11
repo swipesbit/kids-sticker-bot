@@ -1,6 +1,6 @@
 aiogram
 pillow
-opencv-python
+opencv-python-headless
 numpy
 requests
 aiofiles

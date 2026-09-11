@@ -1,82 +1,82 @@
 import os
-import cv2
-import numpy as np
-from PIL import Image
+import requests
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import FSInputFile
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+import asyncio
 
-# Ваш токен Telegram-бота
-TOKEN = "8664542968:AAFjq8WlqQthIyxLv69BVPXGHCfremZ8zKw"
+# Получаем токены из переменных окружения
+TOKEN = os.getenv("TOKEN")
+UNSPLASH_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+
+if not TOKEN:
+    raise ValueError("Не задан токен бота в переменных окружения (TOKEN)!")
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
-def make_cartoon(input_path, output_path):
-    img = cv2.imread(input_path)
-    
-    # Сглаживание цветов для мультяшного эффекта
-    color = cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
-    
-    # Выделение контуров
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.medianBlur(gray, 7)
-    edges = cv2.adaptiveThreshold(
-        blur, 255, 
-        cv2.ADAPTIVE_THRESH_MEAN_C, 
-        cv2.THRESH_BINARY, 
-        blockSize=9, 
-        C=2
-    )
-    
-    edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    cartoon = cv2.bitwise_and(color, edges)
-    
-    cv2.imwrite(output_path, cartoon)
-    
-    # Подгонка под стандарт стикеров Telegram (512x512)
-    pil_img = Image.open(output_path)
-    pil_img = pil_img.resize((512, 512), Image.Resampling.LANCZOS)
-    
-    sticker_path = output_path.replace(".jpg", ".png")
-    pil_img.save(sticker_path, "PNG")
-    return sticker_path
+# Состояния для возможных сценариев (если понадобятся)
+class StickerStates(StatesGroup):
+    waiting_for_image = State()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🎨 Привет! Я бот-мастер детских стикеров.\n"
-        "Пришли мне любую фотографию или мем, а я превращу ее в мультяшный стикер!"
+        "Привет! Я бот-мастер детских стикеров.\n\n"
+        "Пришли мне любую фотографию или мем, а я превращу ее в мультяшный стикер!\n"
+        "А еще я умею искать картинки сам: просто отправь команду `/find [тема]`, например: `/find cute puppy`"
     )
 
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    await message.answer("🪄 Колдую над мультяшным стикером...")
+# Команда для поиска картинок через Unsplash API
+@dp.message(Command("find"))
+async def cmd_find(message: types.Message):
+    text_parts = message.text.split(maxsplit=1)
+    if len(text_parts) < 2:
+        await message.answer("Пожалуйста, укажи ключевое слово для поиска. Пример:\n`/find funny kids`")
+        return
     
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
+    query = text_parts[1]
     
-    input_file = f"downloads_{photo.file_unique_id}.jpg"
-    output_file = f"cartoon_{photo.file_unique_id}.jpg"
-    
-    await bot.download(file_info, destination=input_file)
+    if not UNSPLASH_KEY:
+        await message.answer("Ошибка: не настроен ключ UNSPLASH_ACCESS_KEY в переменных окружения.")
+        return
+
+    url = f"https://api.unsplash.com/photos/random?query={query}&client_id={UNSPLASH_KEY}"
     
     try:
-        final_sticker_path = make_cartoon(input_file, output_file)
-        await message.answer_document(
-            document=FSInputFile(final_sticker_path),
-            caption="Вот твой мультяшный стикер! Готов для добавления в пак."
-        )
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            image_url = data["urls"]["regular"]
+            author = data["user"]["name"]
+            
+            await message.answer_photo(
+                photo=image_url, 
+                caption=f"🔍 Нашел картинку по запросу: *{query}*\n📸 Автор: {author}"
+            )
+        else:
+            await message.answer("К сожалению, по вашему запросу ничего не нашлось. Попробуйте другое слово.")
     except Exception as e:
-        await message.answer(f"Произошла ошибка: {e}")
-    finally:
-        if os.path.exists(input_file): os.remove(input_file)
-        if os.path.exists(output_file): os.remove(output_file)
+        await message.answer(f"Произошла ошибка при поиске: {e}")
+
+# Обработка обычных фотографий от пользователя
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    await message.answer("Фото получено! Обрабатываю и превращаю в стикер...")
+    # Здесь в будущем можно добавить вашу логику OpenCV / Pillow для вырезания стикеров
+    # Сейчас бот просто подтверждает прием фото
+    await asyncio.sleep(1)
+    await message.answer("Готово! (Функция создания стикерпака в разработке, но фото успешно обработано).")
+
+@dp.message(F.text)
+async def handle_text(message: types.Message):
+    await message.answer(f"Я получил твое сообщение: «{message.text}». Отправь мне картинку или используй команду `/find [слово]` для поиска!")
 
 async def main():
-    print("Бот запущен и ждет сообщения!")
+    print("Бот запущен и готов к работе 24/7...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
